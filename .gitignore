@@ -47,9 +47,12 @@ Thumbs.db
 # Environment variables
 .env
 .netrc
+<<<<<<< HEAD
 
 # Project outputs & models
 models/*.pkl
 models/*.npy
 reports/*.html
 reports/*.png
+=======
+>>>>>>> e2f038a040a903b38ee8aa00b0e24ec022c45d70

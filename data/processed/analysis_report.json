@@ -1,0 +1,27 @@
+{
+  "dataset": {
+    "total_records": 150,
+    "unique_sharks": 3,
+    "date_range": "2023-10-01 06:00:00 to 2023-10-13 12:00:00",
+    "region": "Gulf Stream (lat 26-28\u00b0N, lon -78\u00b0W)"
+  },
+  "movement_metrics": {
+    "mean_speed_m_s": 0.3548548194006248,
+    "max_speed_m_s": 0.5643449467703174,
+    "mean_turn_angle_deg": 17.79069322104182,
+    "mean_step_meters": 7664.864099053498
+  },
+  "chlorophyll_sampling": {
+    "valid_samples": 0,
+    "mean_chlorophyll": null,
+    "chlorophyll_range": [
+      NaN,
+      NaN
+    ]
+  },
+  "statistical_findings": {
+    "speed_vs_chlorophyll_correlation": null,
+    "correlation_pvalue": null,
+    "significant": false
+  }
+}

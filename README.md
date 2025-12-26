@@ -1,4 +1,5 @@
 
+<<<<<<< HEAD
 # Sharks From Space 🦈🌊
 
 **Short description:** A reproducible pipeline and interactive dashboard for exploring shark habitat preferences using satellite data (chlorophyll, SST) and bathymetry. Built with Python, Xarray, scikit-learn and Streamlit.
@@ -97,6 +98,17 @@ Add a LICENSE file (for example, MIT) to make the intended license explicit. If 
 ---
 
 If you'd like, I can also add a short `CONTRIBUTING.md`, common `Makefile`/`run.sh` commands, or badges for CI and coverage. Let me know what you'd prefer. ✅
+=======
+# Sharks
+
+Tools and experiments for working with shark foraging and long‑term movement data, built primarily in Python and Jupyter notebooks. [web:0]
+
+## Project structure
+
+- `.venv/` – Local virtual environment (not tracked in detail in this repo). [web:0]  
+- `.vscode/` – Editor configuration for working on the project in VS Code. [web:0]  
+- `data/` – Input data files for shark-related analyses (add a short description of each dataset here). [web:0]  
+>>>>>>> e2f038a040a903b38ee8aa00b0e24ec022c45d70
 - `create_shark_notebook.py` – Helper script to generate or configure shark analysis notebooks. [web:0]  
 - `shark_Foraging_LongTerm.ipynb` – Main notebook exploring long‑term shark foraging patterns. [web:0]
 
