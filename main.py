@@ -3,6 +3,7 @@ from src import auth, fetch_data, process_ocean
 
 # Define paths
 BASE_DIR = Path(__file__).parent
+project_root = BASE_DIR  # For compatibility with notebook
 DATA_RAW = BASE_DIR / "data" / "raw"
 
 def main():

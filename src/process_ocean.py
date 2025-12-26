@@ -13,10 +13,17 @@ def sample_chlorophyll(tag_df, satellite_file):
     # Open the datasets
     try:
         ds_geo = xr.open_dataset(satellite_file, group='geophysical_data')
-        ds_nav = xr.open_dataset(satellite_file, group='navigation_data')
-    except OSError:
-        ds_geo = xr.open_dataset(satellite_file)
-        ds_nav = None
+        try:
+            ds_nav = xr.open_dataset(satellite_file, group='navigation_data')
+        except (OSError, KeyError):
+            ds_nav = None
+    except (OSError, KeyError):
+        try:
+            ds_geo = xr.open_dataset(satellite_file)
+            ds_nav = None
+        except Exception as e:
+            print(f"Error opening file: {e}")
+            return tag_df
 
     # Find the chlorophyll variable
     var_name = None
