@@ -37,8 +37,8 @@ env/
 .ipynb_checkpoints/
 
 # Data files (keep structure, ignore large files)
-data/raw/*.nc
-data/2025-*/*.nc
+data/raw/**/*.nc
+data/2025-*/**/*.nc
 
 # OS
 .DS_Store
