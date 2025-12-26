@@ -1,0 +1,2 @@
+lon,lat,tag_time,sat_time,chl_nearest,chl_bilinear,chl_nearest.1,chl_bilinear.1,sat_time.1,sat_file,chl_flag,time,lon_prev,lat_prev,time_prev,step_m,dt_s,speed_m_s,bearing,bearing_prev,turn_deg,log_chl,chl_valid
+-70.0,30.0,2002-07-04T12:00:00,,0.0690452381968498,,0.0690452381968498,0.0683586092194517,,data\raw\shark\AQUA_MODIS.20020704_20250228.L3m.CU.CHL.chlor_a.9km.nc,1,2002-07-04 12:00:00,,,,,,,,,,-2.658613985713819,1
