@@ -1,0 +1,7 @@
+earthaccess
+xarray
+netcdf4
+pandas
+matplotlib
+scipy
+jupyter
