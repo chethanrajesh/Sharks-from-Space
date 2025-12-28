@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Data files (keep structure, ignore large files)
+data/raw/**/*.nc
+data/2025-*/**/*.nc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.netrc
+<<<<<<< HEAD
+
+# Project outputs & models
+models/*.pkl
+models/*.npy
+reports/*.html
+reports/*.png
+=======
+>>>>>>> e2f038a040a903b38ee8aa00b0e24ec022c45d70
