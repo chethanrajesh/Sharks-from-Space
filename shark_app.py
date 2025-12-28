@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import random
 from datetime import datetime
 import streamlit.components.v1 as components
+import requests
 
 # Import Real-Time Engine (Must be in the same folder as shark_network.py)
 try:
@@ -19,14 +20,244 @@ except ImportError:
 st.set_page_config(page_title="Shark Habitat AI - Global Uplink", layout="wide", page_icon="🦈")
 
 # ==============================================================================
+# 🧮 NEW: ADVANCED MATH ENGINE (Kalman, Buffers, Eddies)
+# ==============================================================================
+
+class SharkKalmanFilter:
+    """
+    Implements a 2D Constant Velocity Kalman Filter to smooth GPS jitters
+    and estimate true swimming velocity vectors.
+    """
+    def __init__(self, dt=1.0, std_acc=1.0, x_std_meas=0.1, y_std_meas=0.1):
+        # State Vector [x, y, vx, vy]
+        self.x = np.matrix([[0], [0], [0], [0]]) 
+        
+        # State Transition Matrix
+        self.A = np.matrix([[1, 0, dt, 0],
+                            [0, 1, 0, dt],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1]])
+        
+        # Measurement Function
+        self.H = np.matrix([[1, 0, 0, 0],
+                            [0, 1, 0, 0]])
+        
+        # Process Noise Covariance
+        self.Q = np.matrix([[(dt**4)/4, 0, (dt**3)/2, 0],
+                            [0, (dt**4)/4, 0, (dt**3)/2],
+                            [(dt**3)/2, 0, dt**2, 0],
+                            [0, (dt**3)/2, 0, dt**2]]) * std_acc**2
+        
+        # Measurement Noise Covariance
+        self.R = np.matrix([[x_std_meas**2, 0],
+                            [0, y_std_meas**2]])
+        
+        # Covariance Matrix
+        self.P = np.eye(self.A.shape[1])
+
+    def predict(self):
+        self.x = self.A * self.x
+        self.P = self.A * self.P * self.A.T + self.Q
+        return self.x[0:2]
+
+    def update(self, z):
+        # z is measurement [[x], [y]]
+        S = self.H * self.P * self.H.T + self.R
+        K = self.P * self.H.T * np.linalg.inv(S)
+        self.x = self.x + K * (z - self.H * self.x)
+        self.P = self.P - K * self.H * self.P
+        return self.x[0:2]
+
+def apply_kalman_smoothing(df):
+    """Runs the Kalman Filter over the entire track history."""
+    kf = SharkKalmanFilter(dt=1.0)
+    smoothed_lat = []
+    smoothed_lon = []
+    
+    # Initialize with first point
+    if not df.empty:
+        kf.x[0,0] = df.iloc[0]['lat']
+        kf.x[1,0] = df.iloc[0]['lon']
+
+    for i, row in df.iterrows():
+        meas = np.matrix([[row['lat']], [row['lon']]])
+        kf.predict()
+        est = kf.update(meas)
+        smoothed_lat.append(est[0,0])
+        smoothed_lon.append(est[1,0])
+        
+    return smoothed_lat, smoothed_lon
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Vectorized Haversine distance in kilometers."""
+    R = 6371.0
+    lat1r = np.radians(lat1)
+    lat2r = np.radians(lat2)
+    dlat = lat2r - lat1r
+    dlon = np.radians(lon2 - lon1)
+    a = np.sin(dlat/2.0)**2 + np.cos(lat1r) * np.cos(lat2r) * np.sin(dlon/2.0)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return R * c
+
+
+def sample_spatial_buffer(lat, lon, map_chlor, lat_grid, lon_grid, radius_km=5):
+    """Sample the chlorophyll and SST fields in a circular buffer around (lat, lon).
+    Returns aggregated stats (mean, max, count) or None if fields unavailable.
+    """
+    try:
+        # Ensure inputs are numpy arrays
+        latg = np.array(lat_grid)
+        long = np.array(lon_grid)
+        chl = np.array(map_chlor)
+        # compute distances (vectorized)
+        dists = haversine_km(lat, lon, latg, long)
+        mask = dists <= radius_km
+        vals = chl[mask]
+        if vals.size == 0:
+            return None
+        return {
+            'mean_chl': float(np.nanmean(vals)),
+            'max_chl': float(np.nanmax(vals)),
+            'n_samples': int(vals.size)
+        }
+    except Exception:
+        return None
+
+
+def analyze_spatial_buffer(lat, lon, map_chlor=None, lat_grid=None, lon_grid=None):
+    """
+    Preferentially performs a real buffer analysis using available model grids; otherwise falls back to a simulated estimate.
+    """
+    if map_chlor is not None and lat_grid is not None and lon_grid is not None:
+        stats = sample_spatial_buffer(lat, lon, map_chlor, lat_grid, lon_grid, radius_km=5)
+        if stats is not None:
+            feature = "Open Water"
+            if stats['max_chl'] > 2.0:
+                feature = "High Productivity Front"
+            return {'feature': feature, 'stats': stats}
+
+    # Fallback (simulate)
+    local_seed = int(abs(lat*lon)*100)
+    random.seed(local_seed)
+    samples_chl = [random.uniform(0.1, 3.5) for _ in range(10)]
+    samples_sst = [random.uniform(18.0, 24.0) for _ in range(10)]
+    max_chl = max(samples_chl)
+    feature = "Open Water"
+    if max_chl > 2.0: feature = "High Productivity Front"
+    if max(samples_sst) - min(samples_sst) > 1.5: feature = "Thermal Wall"
+    return {'feature': feature, 'stats': {'mean_chl': float(np.mean(samples_chl)), 'max_chl': max_chl, 'n_samples': len(samples_chl)}}
+
+def calculate_okubo_weiss(lat, lon, map_ssh=None, lat_grid=None, lon_grid=None):
+    """
+    Calculates the Okubo-Weiss parameter W at (lat, lon) using an SSH field when available.
+    If SSH is not available, falls back to a simulated estimate.
+
+    Returns (W, status) where status is a human-friendly string.
+    """
+    # If a real SSH field is available, use geostrophic relations
+    if map_ssh is not None and lat_grid is not None and lon_grid is not None:
+        try:
+            ssh = np.array(map_ssh)
+            latg = np.array(lat_grid)
+            long = np.array(lon_grid)
+
+            # find nearest grid point index
+            idx = np.argmin(np.abs(latg - lat))
+            jdx = np.argmin(np.abs(long - lon))
+
+            # extract a local window for derivatives (5x5)
+            w = 2
+            i0, i1 = max(0, idx-w), min(ssh.shape[0], idx+w+1)
+            j0, j1 = max(0, jdx-w), min(ssh.shape[1], jdx+w+1)
+            local_ssh = ssh[i0:i1, j0:j1]
+            local_lat = latg[i0:i1]
+            local_lon = long[j0:j1]
+
+            # compute distance arrays (meters)
+            # Convert degree grid spacing to meters using haversine between grid points
+            if local_ssh.size < 4:
+                raise ValueError("SSH window too small")
+
+            # gradients: dssh/dy (north-south) and dssh/dx (east-west)
+            # Use numpy gradient with physical spacing in meters
+            # Compute approximate dy/dx in meters using small deltas
+            # compute dy spacing (meters) as haversine between lat grid rows at central lon
+            lat_mid = latg[idx]
+            dy = haversine_km(lat_mid, long[j0], lat_mid+0.01, long[j0]) * 1000.0 if len(local_lat) > 1 else 1000.0
+            dx = haversine_km(local_lat[0], long[j0], local_lat[0], long[j0]+0.01) * 1000.0 if len(local_lon) > 1 else 1000.0
+
+            dssh_dy, dssh_dx = np.gradient(local_ssh, dy, dx)
+
+            # Use central cell indices
+            ci = local_ssh.shape[0] // 2
+            cj = local_ssh.shape[1] // 2
+            dvdx = 0.0
+            dudy = 0.0
+
+            # geostrophic approximation: u = -g/f * dssh/dy, v = g/f * dssh/dx
+            g = 9.81
+            omega = 7.2921e-5
+            f = 2 * omega * np.sin(np.radians(lat))
+            if f == 0:
+                f = 1e-5
+
+            du_dy = -g/f * dssh_dy
+            dv_dx = g/f * dssh_dx
+
+            # spatial derivatives of u and v
+            du_dx, du_dyy = np.gradient(du_dy, dx, dy)
+            dv_dxx, dv_dy = np.gradient(dv_dx, dx, dy)
+
+            # approximate components at center
+            du_dx_c = du_dx[ci, cj] if du_dx.shape == local_ssh.shape else du_dx
+            dv_dy_c = dv_dy[ci, cj] if dv_dy.shape == local_ssh.shape else dv_dy
+            du_dy_c = du_dy[ci, cj] if du_dy.shape == local_ssh.shape else du_dy
+            dv_dx_c = dv_dx[ci, cj] if dv_dx.shape == local_ssh.shape else dv_dx
+
+            # Strain and vorticity
+            s_n = du_dx_c - dv_dy_c
+            s_s = du_dy_c + dv_dx_c
+            vorticity = dv_dx_c - du_dy_c
+
+            W = s_n**2 + s_s**2 - vorticity**2
+
+            if W < -1e-5:
+                status = "🌀 Eddy Edge / Core (Foraging)"
+            elif W < 0:
+                status = "🔄 Weak Eddy Strain"
+            else:
+                status = "🌊 Strain / Laminar"
+
+            return float(W), status
+        except Exception:
+            pass
+
+    # Fallback simulated method
+    random.seed(int(lat*lon*1000))
+    strain = random.uniform(0, 10)
+    vorticity = random.uniform(0, 10)
+    W = (strain**2) - (vorticity**2)
+    if W < -20:
+        status = "🌀 Eddy Core (Trap)"
+    elif W < 0:
+        status = "🔄 Eddy Edge (Foraging)"
+    else:
+        status = "🌊 Laminar Flow"
+    return W, status
+
+# ==============================================================================
 # 🧠 NEW: DIETARY & PREDATION ENGINE (Fixed Images & Analytics)
 # ==============================================================================
 
-def get_dietary_profile(species, region):
+def get_dietary_profile(species, region, lat, lon):
     """
     Returns the specific diet, prey images, and nutritional data 
     based on the Shark Species and current Region.
     """
+    # Create a unique seed based on location to vary the diet
+    loc_seed = int(abs(lat + lon) * 1000)
+    random.seed(loc_seed)
+
     # 1. DEFINE PREY DATABASE (Updated to Unsplash for Reliability)
     prey_db = {
         "Seal": {
@@ -141,6 +372,10 @@ def get_dietary_profile(species, region):
 
 def get_local_ecosystem(lat, lon, depth, temp):
     """Simulates a scientifically accurate local ecosystem."""
+    # Seed based on location for procedural variety
+    geo_seed = int(abs(lat * lon * (depth + 1)) * 100)
+    random.seed(geo_seed)
+
     ecosystem = {"flora": [], "fauna": []}
     
     abs_lat = abs(lat)
@@ -303,6 +538,30 @@ def get_ocean_zone_label(depth):
     elif depth < 1000: return "🌑 Mesopelagic (Twilight)"
     else: return "⚫ Bathypelagic (Midnight)"
 
+
+def make_prey_svg(prey_name):
+    """Return an inline SVG data URI (base64) for a given prey name. This avoids external image failures."""
+    import base64
+    # Simple illustrated placeholder (styled rectangle + silhouette-like shape)
+    title = prey_name.replace('&', '&amp;')
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400">
+        <defs>
+            <linearGradient id="g" x1="0" x2="1">
+                <stop offset="0%" stop-color="#dff1ff"/>
+                <stop offset="100%" stop-color="#eaf7ff"/>
+            </linearGradient>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#g)" rx="12"/>
+        <g transform="translate(100,70)">
+            <ellipse cx="200" cy="120" rx="120" ry="60" fill="#9ad0e8"/>
+            <circle cx="270" cy="100" r="24" fill="#7fb8d7"/>
+            <rect x="320" y="108" width="36" height="14" rx="7" fill="#7fb8d7" transform="rotate(-12 338 115)"/>
+        </g>
+        <text x="50%" y="82%" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#2b5b6f" text-anchor="middle">Primary Target: {title}</text>
+    </svg>'''
+    b64 = base64.b64encode(svg.encode('utf-8')).decode('utf-8')
+    return f"data:image/svg+xml;base64,{b64}"
+
 def calculate_speed(prev_row, curr_row):
     """Estimates speed between two points (Knots)."""
     if prev_row is None: return 0.0
@@ -383,8 +642,15 @@ def generate_animated_map_html(df_input):
     df = df_input.copy()
     if 'icon' not in df.columns: df['icon'] = "🦈"
     if 'size' not in df.columns: df['size'] = 25
-    if 'time' in df.columns: df['frame_label'] = df['time'].astype(str)
-    else: df['frame_label'] = [f"Ping {i+1}" for i in range(len(df))]
+
+    # Prefer a human-readable UTC timestamp for animation frames when available
+    if 'time' in df.columns or 'datetime' in df.columns:
+        # Accept either `time` or `datetime` as the timestamp column
+        time_col = 'time' if 'time' in df.columns else 'datetime'
+        times = pd.to_datetime(df[time_col], errors='coerce', utc=True)
+        df['frame_label'] = [t.strftime('%Y-%m-%d %H:%M:%S UTC') if not pd.isnull(t) else f"Ping {i+1}" for i, t in enumerate(times)]
+    else:
+        df['frame_label'] = [f"Ping {i+1}" for i in range(len(df))]
 
     fig = px.scatter_mapbox(
         df, lat="lat", lon="lon", text="icon", size="size",
@@ -404,8 +670,17 @@ def render_tactical_console(df, shark_name, shark_species_actual):
     # --- 0. TIMELINE CONTROL ---
     with st.container():
         if len(df) > 1:
-            selected_index = st.slider("📼 Scrub Mission Timeline:", 0, len(df) - 1, 0, format="Ping #%d")
-        else: selected_index = 0
+            # If timestamps exist, show human-friendly UTC labels via select_slider so users pick by time
+            if 'time' in df.columns or 'datetime' in df.columns:
+                time_col = 'time' if 'time' in df.columns else 'datetime'
+                times = pd.to_datetime(df[time_col], errors='coerce', utc=True)
+                time_labels = [t.strftime('%Y-%m-%d %H:%M:%S UTC') if not pd.isna(t) else f'Ping {i+1}' for i, t in enumerate(times)]
+                selected_label = st.select_slider("📼 Scrub Mission Timeline (UTC):", options=time_labels, value=time_labels[0])
+                selected_index = time_labels.index(selected_label)
+            else:
+                selected_index = st.slider("📼 Scrub Mission Timeline:", 0, len(df) - 1, 0, format="Ping #%d")
+        else:
+            selected_index = 0
             
     # --- 1. DATA GENERATION ---
     unique_seed = hash(shark_name + str(selected_index)) % (2**32)
@@ -415,6 +690,11 @@ def render_tactical_console(df, shark_name, shark_species_actual):
     row = df.iloc[selected_index]
     prev = df.iloc[selected_index - 1] if selected_index > 0 else None
     
+    # 1. KALMAN FILTER SMOOTHING (Advanced Math Feature)
+    smoothed_lats, smoothed_lons = apply_kalman_smoothing(df.iloc[:selected_index+1])
+    current_smooth_lat = smoothed_lats[-1] if smoothed_lats else row['lat']
+    current_smooth_lon = smoothed_lons[-1] if smoothed_lons else row['lon']
+
     # Physics
     shark_depth_bias = (hash(shark_name) % 800)
     sim_depth = int(abs(np.sin(selected_index * 0.2) * 400 + shark_depth_bias + np.random.normal(0, 50)))
@@ -422,9 +702,44 @@ def render_tactical_console(df, shark_name, shark_species_actual):
     
     depth = row.get('depth', sim_depth)
     temp = row.get('temp', round(sim_temp, 1))
-    
-    calc_speed = calculate_speed(prev, row)
-    final_speed = max(0.0, round(calc_speed + np.random.uniform(-1.0, 2.0), 1))
+
+    # Compute smoothed speed using Kalman outputs (preferred)
+    smooth_speed_kts = 0.0
+    turn_angle_deg = None
+    try:
+        if len(smoothed_lats) >= 2:
+            lat1, lon1 = smoothed_lats[-2], smoothed_lons[-2]
+            lat2, lon2 = smoothed_lats[-1], smoothed_lons[-1]
+            dist_km = haversine_km(lat1, lon1, lat2, lon2)
+            # time delta (hours) between pings
+            tcol = 'time' if 'time' in df.columns else 'datetime' if 'datetime' in df.columns else None
+            if tcol:
+                times = pd.to_datetime(df[tcol].iloc[:selected_index+1], errors='coerce', utc=True)
+                t1 = times.iloc[-2]
+                t2 = times.iloc[-1]
+                dt_hours = max((t2 - t1).total_seconds() / 3600.0, 1.0/3600.0) if not pd.isna(t1) and not pd.isna(t2) else 1.0
+            else:
+                dt_hours = 1.0
+            smooth_speed_kts = round((dist_km / 1.852) / dt_hours, 1)
+        if len(smoothed_lats) >= 3:
+            # compute turn angle between last two segments
+            lat0, lon0 = smoothed_lats[-3], smoothed_lons[-3]
+            lat1, lon1 = smoothed_lats[-2], smoothed_lons[-2]
+            lat2, lon2 = smoothed_lats[-1], smoothed_lons[-1]
+            def bearing(a_lat,a_lon,b_lat,b_lon):
+                y = np.sin(np.radians(b_lon-a_lon)) * np.cos(np.radians(b_lat))
+                x = np.cos(np.radians(a_lat))*np.sin(np.radians(b_lat)) - np.sin(np.radians(a_lat))*np.cos(np.radians(b_lat))*np.cos(np.radians(b_lon-a_lon))
+                return (np.degrees(np.arctan2(y,x)) + 360) % 360
+            b1 = bearing(lat0, lon0, lat1, lon1)
+            b2 = bearing(lat1, lon1, lat2, lon2)
+            diff = abs((b2 - b1 + 180) % 360 - 180)
+            turn_angle_deg = round(diff, 1)
+    except Exception:
+        smooth_speed_kts = 0.0
+        turn_angle_deg = None
+
+    # use smoothed speed to feed downstream calculations where available
+    final_speed = smooth_speed_kts if smooth_speed_kts > 0 else max(0.0, round(calculate_speed(prev, row) + np.random.uniform(-1.0, 2.0), 1))
     
     # AI Logic
     ai_beh, ai_det, ai_act, ai_thr, ai_conf, ai_fac = get_ai_prediction(row, final_speed, prev)
@@ -434,18 +749,46 @@ def render_tactical_console(df, shark_name, shark_species_actual):
     impact_data = calculate_ecosystem_impact(ai_beh, local_ecosystem, final_speed)
     
     # Diet Logic
-    diet_info = get_dietary_profile(shark_species_actual, current_region)
+    diet_info = get_dietary_profile(shark_species_actual, current_region, row['lat'], row['lon'])
     
+    # NEW: Advanced Analytics (use real fields when available)
+    spatial_buffer = analyze_spatial_buffer(row['lat'], row['lon'], map_chlor if 'map_chlor' in globals() else None, globals().get('lat_grid'), globals().get('lon_grid'))
+    okubo_w, eddy_status = calculate_okubo_weiss(row['lat'], row['lon'], globals().get('map_ssh'), globals().get('lat_grid'), globals().get('lon_grid'))
+
     # =========================================================
     # BLOCK 1: TELEMETRY
     # =========================================================
     st.markdown(f"### 🕵️ Tactical Telemetry: {shark_name}")
     with st.container(border=True):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("🕒 Time (UTC)", str(row.get('time', 'N/A')).split(" ")[-1])
-        c2.metric("🚀 Velocity", f"{final_speed} kts")
+
+        # Format time as UTC if possible (accept `time` or `datetime`)
+        time_raw = None
+        if 'time' in row.index:
+            time_raw = row.get('time')
+        elif 'datetime' in row.index:
+            time_raw = row.get('datetime')
+
+        try:
+            time_parsed = pd.to_datetime(time_raw, errors='coerce', utc=True)
+            time_utc_str = time_parsed.strftime('%Y-%m-%d %H:%M:%S UTC') if not pd.isna(time_parsed) else 'N/A'
+        except Exception:
+            time_utc_str = 'N/A'
+
+        c1.metric("🕒 Time (UTC)", time_utc_str)
+        c2.metric("🚀 Velocity (Kalman)", f"{final_speed} kts", delta="Smoothed", delta_color="normal")
         c3.metric("📉 Depth", f"-{depth} ft")
         c4.caption(f"ZONE: {get_ocean_zone_label(depth)}")
+
+        # Supplemental telemetry: turn angle and local productivity
+        s1, s2, s3 = st.columns([1,1,1])
+        s1.metric("🔁 Turn Angle", f"{turn_angle_deg}°" if turn_angle_deg is not None else "N/A")
+        if isinstance(spatial_buffer, dict) and spatial_buffer.get('stats'):
+            s2.metric("🌿 Mean Chlorophyll (5km)", f"{spatial_buffer['stats']['mean_chl']:.2f} mg/m^3")
+            s3.metric("🌿 Max Chlorophyll (5km)", f"{spatial_buffer['stats']['max_chl']:.2f}")
+        else:
+            s2.metric("🌿 Means Chlorophyll (5km)", "N/A")
+            s3.metric("🌿 Max Chlorophyll (5km)", "N/A")
 
     # =========================================================
     # BLOCK 2: NEURAL NETWORK
@@ -457,10 +800,22 @@ def render_tactical_console(df, shark_name, shark_species_actual):
         h1.subheader(f"{ai_beh}")
         h2.progress(ai_conf / 100)
         c1, c2 = st.columns([1, 2])
-        c1.markdown(f"**THREAT LEVEL:** :{status_color}[**{ai_thr}**]")
-        c1.code(ai_act, language=None)
-        c2.info(f"**Interpretation:** {ai_det}")
-        c2.caption("🔍 **FACTORS:** " + ", ".join(ai_fac))
+        
+        with c1:
+            st.markdown(f"**THREAT LEVEL:** :{status_color}[**{ai_thr}**]")
+            st.code(ai_act, language=None)
+        
+        with c2:
+            st.info(f"**Interpretation:** {ai_det}")
+            st.markdown("**🌊 Advanced Ocean Dynamics (SWOT/NASA)**")
+            st.markdown(f"- **Eddy Status:** `{eddy_status}`")
+            st.markdown(f"- **Okubo-Weiss (W):** `{okubo_w:.3f}`")
+            if isinstance(spatial_buffer, dict) and spatial_buffer.get('stats'):
+                st.markdown(f"- **Buffer (5km):** `{spatial_buffer.get('feature')}`")
+                st.markdown(f"  - Mean Chlorophyll: `{spatial_buffer['stats']['mean_chl']:.3f}` mg/m^3")
+                st.markdown(f"  - Max Chlorophyll: `{spatial_buffer['stats']['max_chl']:.3f}` mg/m^3")
+            else:
+                st.markdown(f"- **Buffer (5km):** `{spatial_buffer}`")
 
     # =========================================================
     # BLOCK 3: ECOSYSTEM
@@ -502,8 +857,55 @@ def render_tactical_console(df, shark_name, shark_species_actual):
         d1, d2 = st.columns([1, 2])
         
         with d1:
-            # High-Res Image of Prey
-            st.image(diet_info['prey_data']['img'], caption=f"Primary Target: {diet_info['prey_name']}", use_container_width=True)
+            # High-Res Image of Prey (validate URL and provide fallback if unavailable)
+            img_url = diet_info['prey_data'].get('img', '')
+            fallback = "https://via.placeholder.com/600x400?text=No+image+available"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://unsplash.com/"}
+            img_bytes = None
+            debug_info = {}
+
+            def _is_image_bytes(b):
+                if not b or not isinstance(b, (bytes, bytearray)):
+                    return False
+                # JPEG, PNG, GIF, WEBP
+                return b.startswith(b"\xff\xd8") or b.startswith(b"\x89PNG") or b.startswith(b"GIF8") or b[0:4] == b"RIFF"
+
+            try:
+                if not img_url:
+                    raise ValueError("No image URL provided")
+                r = requests.get(img_url, headers=headers, timeout=6)
+                debug_info['url_status'] = getattr(r, 'status_code', None)
+                debug_info['content_type'] = r.headers.get('content-type', '') if r is not None else ''
+                content = r.content if r is not None else None
+                if r.status_code // 100 == 2 and (debug_info['content_type'].startswith('image') or _is_image_bytes(content)):
+                    img_bytes = content
+                r.close()
+            except Exception as e:
+                debug_info['error'] = str(e)
+                img_bytes = None
+
+            # Try fallback if primary failed
+            if img_bytes is None:
+                try:
+                    rf = requests.get(fallback, timeout=6)
+                    debug_info['fb_status'] = getattr(rf, 'status_code', None)
+                    debug_info['fb_ct'] = rf.headers.get('content-type', '') if rf is not None else ''
+                    if rf.status_code // 100 == 2 and _is_image_bytes(rf.content):
+                        img_bytes = rf.content
+                    rf.close()
+                except Exception as e:
+                    debug_info['fb_error'] = str(e)
+                    img_bytes = None
+
+            if img_bytes is not None:
+                st.image(img_bytes, caption=f"Primary Target: {diet_info['prey_name']}", use_container_width=True)
+            else:
+                # Use a locally generated SVG 'photo' so users see a proper image even when remote fetch fails
+                svg_data_uri = make_prey_svg(diet_info['prey_name'])
+                # Render via <img> tag to ensure consistent sizing
+                components.html(f'<img src="{svg_data_uri}" style="width:100%;height:auto;border-radius:6px;"/>', height=260)
+                # Subtle caption (no HTTP errors shown)
+                st.caption("Image source unavailable — showing local artwork.")
             
         with d2:
             st.subheader(f"Current Status: {diet_info['status']}")
@@ -543,12 +945,27 @@ def render_tactical_console(df, shark_name, shark_species_actual):
 def load_simulation_data():
     model = joblib.load("models/shark_ai_model.pkl")
     try: imputer = joblib.load("models/shark_imputer.pkl")
-    except: imputer = None 
+    except: imputer = None
+
     map_sst = np.nan_to_num(np.load("models/map_sst.npy"), nan=0.0)
     map_chlor = np.nan_to_num(np.load("models/map_chlor.npy"), nan=0.0)
     map_depth = np.nan_to_num(np.load("models/map_depth.npy"), nan=0.0)
+
+    # Optional grids / SSH (SWOT-derived) if available
+    try:
+        lat_grid = np.load("models/lat_grid.npy")
+        lon_grid = np.load("models/lon_grid.npy")
+    except Exception:
+        lat_grid = None
+        lon_grid = None
+
+    try:
+        map_ssh = np.load("models/map_ssh.npy")
+    except Exception:
+        map_ssh = None
+
     df = pd.read_csv("models/shark_data.csv")
-    return model, imputer, map_sst, map_chlor, map_depth, df
+    return model, imputer, map_sst, map_chlor, map_depth, lat_grid, lon_grid, map_ssh, df
 
 # ==============================================================================
 # MAIN APP LOGIC
@@ -575,8 +992,26 @@ if app_mode == "Live Global Tracker (Real-Time)":
 
         with tab1:
             st.subheader(f"Active Signals: {len(df_live)} Tags Online")
+
+            # Allow user to show all tags or limit for performance
+            max_markers = st.sidebar.number_input(
+                "Max markers to display on global map (0 = all)",
+                min_value=0,
+                max_value=int(len(df_live)),
+                value=0,
+                step=100
+            )
+
+            if int(max_markers) == 0:
+                df_plot = df_live
+            else:
+                df_plot = df_live.head(int(max_markers))
+
+            if len(df_plot) > 2000:
+                st.warning("Rendering many markers may be slow in the browser; consider limiting the number or use the Mission Analysis tab.")
+
             fig_global = px.scatter_geo(
-                df_live.head(100), lat="lat", lon="lon",
+                df_plot, lat="lat", lon="lon",
                 hover_name="name", hover_data=["species", "last_seen"],
                 color="species", projection="natural earth",
                 title="Real-Time Fleet Positions"
@@ -641,7 +1076,11 @@ if app_mode == "Live Global Tracker (Real-Time)":
 else:
     # --- SIMULATION MODE (PRESERVED FULLY) ---
     try:
-        model, imputer, map_sst, map_chlor, map_depth, df_sharks = load_simulation_data()
+        model, imputer, map_sst, map_chlor, map_depth, lat_grid, lon_grid, map_ssh, df_sharks = load_simulation_data()
+        # Expose to module scope for helper functions
+        globals()['lat_grid'] = lat_grid
+        globals()['lon_grid'] = lon_grid
+        globals()['map_ssh'] = map_ssh
     except Exception as e:
         st.error(f"❌ Error loading simulation models: {e}")
         st.stop()
